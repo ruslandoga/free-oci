@@ -28,7 +28,7 @@ defmodule O do
     result =
       case create_instance(instance_config(name, shape)) do
         {:ok, %Finch.Response{status: 200, body: body}} ->
-          Logger.info(created: body)
+          Logger.info(shape: shape, created: body)
 
           case names do
             [] -> {:stop, :normal, state}
@@ -36,11 +36,11 @@ defmodule O do
           end
 
         {:ok, %Finch.Response{status: 429, body: body}} ->
-          Logger.warn(Map.fetch!(body, "message"))
+          Logger.warn(shape: shape, message: Map.fetch!(body, "message"))
           {:sleep, state}
 
-        {:ok, %Finch.Response{status: 500, body: body}} ->
-          Logger.error(Map.fetch!(body, "message"))
+        {:ok, %Finch.Response{status: status, body: body}} ->
+          Logger.error(shape: shape, status: status, message: Map.fetch!(body, "message"))
           {:cont, state}
 
         {:error, error} ->
@@ -224,7 +224,7 @@ defmodule O do
 
   require Record
 
-  for {k, v} <- [rsa_private_key: :RSAPrivateKey, rsa_public_key: :RSAPublicKey] do
+  for {k, v} <- [rsa_private_key: :RSAPrivateKey] do
     Record.defrecord(k, v, Record.extract(v, from_lib: "public_key/include/OTP-PUB-KEY.hrl"))
   end
 
