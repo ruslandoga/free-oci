@@ -1,0 +1,7 @@
+app = "free-oci"
+
+kill_signal = "SIGTERM"
+kill_timeout = 5
+
+[build]
+  image = "ghcr.io/ruslandoga/free-oci:master"
