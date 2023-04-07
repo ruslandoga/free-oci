@@ -12,12 +12,25 @@ defmodule O do
   end
 
   def availability_domain do
+    query = %{"compartmentId" => config(:tenancy)}
+    domains = get("identity", "/20160918/availabilityDomains", query)
+    domains |> Enum.random() |> Map.fetch!("name")
   end
 
-  def oracle_amd_image do
-  end
+  def image(shape) do
+    query = %{
+      "compartmentId" => config(:tenancy),
+      "operatingSystem" => "Oracle Linux",
+      "operatingSystemVersion" => 8,
+      "shape" => shape
+    }
 
-  def oracle_arm_image do
+    images = get("iaas", "/20160918/images", query)
+
+    images
+    |> Enum.sort_by(& &1["timeCreated"], :desc)
+    |> List.first()
+    |> Map.fetch!("id")
   end
 
   # https://docs.oracle.com/en-us/iaas/api/#/en/iaas/20160918/Instance/LaunchInstance
@@ -29,8 +42,22 @@ defmodule O do
   def default_instance_config do
     %{
       "metadata" => %{"ssh_authorized_keys" => config(:public_key)},
+      "agentConfig" => %{
+        "isManagementDisabled" => false,
+        "isMonitoringDisabled" => false,
+        "pluginsConfig" => [
+          %{"name" => "Vulnerability Scanning", "desiredState" => "DISABLED"},
+          %{"name" => "Oracle Java Management Service", "desiredState" => "DISABLED"},
+          %{"name" => "OS Management Service Agent", "desiredState" => "ENABLED"},
+          %{"name" => "Management Agent", "desiredState" => "DISABLED"},
+          %{"name" => "Custom Logs Monitoring", "desiredState" => "ENABLED"},
+          %{"name" => "Compute Instance Run Command", "desiredState" => "ENABLED"},
+          %{"name" => "Compute Instance Monitoring", "desiredState" => "ENABLED"},
+          %{"name" => "Block Volume Management", "desiredState" => "DISABLED"},
+          %{"name" => "Bastion", "desiredState" => "DISABLED"}
+        ]
+      },
       "compartmentId" => config(:tenancy),
-      "displayName" => "instance-#{Date.utc_today()}",
       "availabilityDomain" => availability_domain(),
       "createVnicDetails" => %{
         "assignPublicIp" => true,
@@ -46,13 +73,15 @@ defmodule O do
     }
   end
 
-  def create_arm_instance do
+  def create_arm_instance(name) do
+    shape = "VM.Standard.A1.Flex"
+
     create_instance(%{
-      "shape" => "VM.Standard.A1.Flex",
+      "displayName" => name,
+      "shape" => shape,
       "sourceDetails" => %{
-        "sourceId" => oracle_arm_image(),
-        "sourceType" => "image",
-        "bootVolumeSizeInGbs" => 50
+        "imageId" => image(shape),
+        "sourceType" => "image"
       },
       "shapeConfig" => %{
         "ocpus" => 1,
@@ -61,13 +90,15 @@ defmodule O do
     })
   end
 
-  def create_amd_instance do
+  def create_amd_instance(name) do
+    shape = "VM.Standard.E2.1.Micro"
+
     create_instance(%{
-      "shape" => "VM.Standard.E2.1.Micro",
+      "displayName" => name,
+      "shape" => shape,
       "sourceDetails" => %{
-        "sourceId" => oracle_amd_image(),
-        "sourceType" => "image",
-        "bootVolumeSizeInGbs" => 50
+        "imageId" => image(shape),
+        "sourceType" => "image"
       },
       "shapeConfig" => %{
         "ocpus" => 1,
@@ -110,8 +141,16 @@ defmodule O do
   end
 
   defp request(req) do
-    with {:ok, %{body: body} = resp} <- Finch.request(req, O.finch()) do
-      {:ok, %{resp | body: Jason.decode!(body)}}
+    # TODO 429 -> sleep extra
+    case Finch.request(req, O.finch()) do
+      {:ok, %Finch.Response{status: 200, body: body}} ->
+        Jason.decode!(body)
+
+      {:ok, %Finch.Response{body: body}} ->
+        raise Map.fetch!(Jason.decode!(body), "message")
+
+      {:error, error} ->
+        raise error
     end
   end
 
