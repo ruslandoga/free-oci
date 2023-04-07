@@ -2,22 +2,108 @@ defmodule O do
   @moduledoc "Very basic OCI client used to create instances"
   @app :o
 
+  use GenServer
+  require Logger
+
   def finch, do: __MODULE__.Finch
   def config(key), do: Application.fetch_env!(@app, key)
 
-  # https://docs.oracle.com/en-us/iaas/api/#/en/iaas/20160918/Instance/ListInstances
+  @impl true
+  def init(state) do
+    {:ok, %Finch.Response{status: 200, body: instances}} = list_instances()
+    names = state.names -- Enum.map(instances, & &1["displayName"])
+
+    if names == [] do
+      :ignore
+    else
+      rand_schedule_loop(:timer.seconds(10))
+      {:ok, %{state | names: names}}
+    end
+  end
+
+  @impl true
+  def handle_info(:loop, state) do
+    %{names: [name | names], shape: shape} = state
+
+    result =
+      case create_instance(instance_config(name, shape)) do
+        {:ok, %Finch.Response{status: 200, body: body}} ->
+          Logger.info(created: body)
+
+          case names do
+            [] -> {:stop, :normal, state}
+            _ -> {:cont, %{state | names: names}}
+          end
+
+        {:ok, %Finch.Response{status: 429, body: body}} ->
+          Logger.warn(Map.fetch!(body, "message"))
+          {:sleep, state}
+
+        {:ok, %Finch.Response{status: 500, body: body}} ->
+          Logger.error(Map.fetch!(body, "message"))
+          {:cont, state}
+
+        {:error, error} ->
+          raise error
+      end
+
+    case result do
+      {:stop, _reason, _state} = stop ->
+        stop
+
+      {:sleep, state} ->
+        rand_schedule_loop(:timer.seconds(120))
+        {:noreply, state}
+
+      {:cont, state} ->
+        rand_schedule_loop(:timer.seconds(60))
+        {:noreply, state}
+    end
+  end
+
+  defp rand_schedule_loop(time) do
+    Process.send_after(self(), :loop, :rand.uniform(time))
+  end
+
+  def instance_config(name, shape) do
+    Map.merge(default_instance_config(name), shape_config(shape))
+  end
+
+  defp shape_config("VM.Standard.A1.Flex" = shape) do
+    %{
+      "shape" => shape,
+      "sourceDetails" => %{"imageId" => image(shape), "sourceType" => "image"},
+      "shapeConfig" => %{"ocpus" => 1, "memoryInGBs" => 6}
+    }
+  end
+
+  defp shape_config("VM.Standard.E2.1.Micro" = shape) do
+    %{
+      "shape" => shape,
+      "sourceDetails" => %{"imageId" => image(shape), "sourceType" => "image"},
+      "shapeConfig" => %{"ocpus" => 1, "memoryInGBs" => 1}
+    }
+  end
+
   def list_instances(query \\ %{}) do
     query = Map.put_new(query, "compartmentId", config(:tenancy))
     get("iaas", "/20160918/instances", query)
   end
 
-  def availability_domain do
+  def create_instance(body \\ %{}) do
+    post("iaas", "/20160918/instances", body)
+  end
+
+  defp availability_domain do
     query = %{"compartmentId" => config(:tenancy)}
-    domains = get("identity", "/20160918/availabilityDomains", query)
+
+    {:ok, %Finch.Response{status: 200, body: domains}} =
+      get("identity", "/20160918/availabilityDomains", query)
+
     domains |> Enum.random() |> Map.fetch!("name")
   end
 
-  def image(shape) do
+  defp image(shape) do
     query = %{
       "compartmentId" => config(:tenancy),
       "operatingSystem" => "Oracle Linux",
@@ -25,7 +111,7 @@ defmodule O do
       "shape" => shape
     }
 
-    images = get("iaas", "/20160918/images", query)
+    {:ok, %Finch.Response{status: 200, body: images}} = get("iaas", "/20160918/images", query)
 
     images
     |> Enum.sort_by(& &1["timeCreated"], :desc)
@@ -33,14 +119,9 @@ defmodule O do
     |> Map.fetch!("id")
   end
 
-  # https://docs.oracle.com/en-us/iaas/api/#/en/iaas/20160918/Instance/LaunchInstance
-  def create_instance(body \\ %{}) do
-    body = Map.merge(default_instance_config(), body)
-    post("iaas", "/20160918/instances", body)
-  end
-
-  def default_instance_config do
+  defp default_instance_config(name) do
     %{
+      "displayName" => name,
       "metadata" => %{"ssh_authorized_keys" => config(:public_key)},
       "agentConfig" => %{
         "isManagementDisabled" => false,
@@ -71,40 +152,6 @@ defmodule O do
         "areLegacyImdsEndpointsDisabled" => true
       }
     }
-  end
-
-  def create_arm_instance(name) do
-    shape = "VM.Standard.A1.Flex"
-
-    create_instance(%{
-      "displayName" => name,
-      "shape" => shape,
-      "sourceDetails" => %{
-        "imageId" => image(shape),
-        "sourceType" => "image"
-      },
-      "shapeConfig" => %{
-        "ocpus" => 1,
-        "memoryInGBs" => 6
-      }
-    })
-  end
-
-  def create_amd_instance(name) do
-    shape = "VM.Standard.E2.1.Micro"
-
-    create_instance(%{
-      "displayName" => name,
-      "shape" => shape,
-      "sourceDetails" => %{
-        "imageId" => image(shape),
-        "sourceType" => "image"
-      },
-      "shapeConfig" => %{
-        "ocpus" => 1,
-        "memoryInGBs" => 1
-      }
-    })
   end
 
   defp get(service, path, query) do
@@ -141,16 +188,8 @@ defmodule O do
   end
 
   defp request(req) do
-    # TODO 429 -> sleep extra
-    case Finch.request(req, O.finch()) do
-      {:ok, %Finch.Response{status: 200, body: body}} ->
-        Jason.decode!(body)
-
-      {:ok, %Finch.Response{body: body}} ->
-        raise Map.fetch!(Jason.decode!(body), "message")
-
-      {:error, error} ->
-        raise error
+    with {:ok, %Finch.Response{body: body} = resp} <- Finch.request(req, O.finch()) do
+      {:ok, %Finch.Response{resp | body: Jason.decode!(body)}}
     end
   end
 

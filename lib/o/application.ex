@@ -7,8 +7,27 @@ defmodule O.Application do
 
   @impl true
   def start(_type, _args) do
+    to_create = %{
+      "VM.Standard.A1.Flex" => ["alice", "bob", "chad"],
+      "VM.Standard.E2.1.Micro" => ["ivan"]
+    }
+
+    loopers =
+      Enum.map(to_create, fn {shape, names} ->
+        %{
+          id: shape,
+          start: {GenServer, :start_link, [O, %{names: names, shape: shape}]},
+          restart: :transient
+        }
+      end)
+
     children = [
-      {Finch, name: O.finch()}
+      {Finch, name: O.finch()},
+      %{
+        id: :loopers,
+        type: :supervisor,
+        start: {Supervisor, :start_link, [loopers, [strategy: :one_for_one, name: :loopers]]}
+      }
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
